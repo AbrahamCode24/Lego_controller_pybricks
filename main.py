@@ -5,162 +5,90 @@ import os
 from queue import Queue, Empty
 import customtkinter as ctk
 
-from bleak import BleakScanner 
-from pybricksdev.ble import find_device  # type: ignore
-from pybricksdev.connections.pybricks import PybricksHubBLE  # type: ignore
+from bleak import BleakScanner
+from pybricksdev.connections.pybricks import PybricksHubBLE
 
-# -------------------- Programa enviado al Hub -------------------- 
-
-def create_program(drive_cmd: str) -> str:
-    # Definición de comandos y velocidades
-    # Nota: 1100 es aprox la velocidad máxima de los motores Spike
-    drive_commands = {
-        'run_forward': "motorB.run(-800)\nmotorF.run(800)",
-        'run_turbo':   "motorB.run(-1100)\nmotorF.run(1100)",
-        'run_backward': "motorB.run(500)\nmotorF.run(-500)",
-        'stop': "motorB.stop()\nmotorF.stop()\nmotorD.stop()",
-        'izquierda': "motorD.run_target(300, -35)\nmotorD.stop()",
-        'derecha': "motorD.run_target(300, 35)\nmotorD.stop()",
-        'centro': "motorD.run_target(300, 0)\nmotorD.stop()",
-    }
-
-    drive_code = drive_commands.get(drive_cmd, "motorB.stop()\nmotorF.stop()\nmotorD.stop()")
-
-    # Tiempos de espera según el comando
-    wait_code = ""
-    if drive_cmd == 'run_forward':
-        wait_code = "wait(600)"
-    elif drive_cmd == 'run_turbo':
-        wait_code = "wait(2000)"
-    elif drive_cmd == 'run_backward':
-        wait_code = "wait(800)"
-    elif drive_cmd in ['izquierda', 'derecha', 'centro']:
-        wait_code = "wait(500)"
-
-    program = f"""
+# ==============================================================================
+# 1. CÓDIGO DEL FIRMWARE (Lógica del Robot - Gateway)
+# ==============================================================================
+HUB_GATEWAY_CODE = """
 from pybricks.hubs import PrimeHub
 from pybricks.pupdevices import Motor
 from pybricks.parameters import Port
 from pybricks.tools import wait
+import uselect
+import usys
 
 hub = PrimeHub()
 motorB = Motor(Port.B)
 motorF = Motor(Port.F)
 motorD = Motor(Port.D)
 
-{drive_code}
-{wait_code}
-motorB.stop()
-motorF.stop()
+poll = uselect.poll()
+poll.register(usys.stdin, uselect.POLLIN)
+
+hub.display.char('G')
+
+while True:
+    if poll.poll(10):
+        cmd = usys.stdin.read(1)
+        if cmd == 'F':
+            motorB.run(-1100)
+            motorF.run(1100)
+        elif cmd == 'T':
+            motorB.run(-1100)
+            motorF.run(1100)
+        elif cmd == 'B':
+            motorB.run(800)
+            motorF.run(-800)
+        elif cmd == 'L':
+            motorD.run_target(500, -25, wait=False)
+        elif cmd == 'R':
+            motorD.run_target(500, 25, wait=False)
+        elif cmd == 'C':
+            motorD.run_target(500, 0, wait=True)
+            motorD.stop()
+        elif cmd == 'S':
+            motorB.stop()
+            motorF.stop()
+        elif cmd == 'X':
+            motorB.stop()
+            motorF.stop()
+            motorD.stop()
+            raise SystemExit
+    wait(10)
 """
-    return program
-
-async def execute_command(hub: PybricksHubBLE, drive_cmd: str, log_cb=None):
-    program = create_program(drive_cmd)
-    
-    with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False, encoding='utf-8') as tf:
-        tf.write(program)
-        temp_path = tf.name
-
-    try:
-        await hub.run(temp_path, wait=True, print_output=False) 
-        if log_cb:
-            log_cb(f"Ejecutado: {drive_cmd}")
-    except Exception as e:
-        if log_cb:
-            log_cb(f"Error ejecutando comando: {e}")
-    finally:
-        try:
-            os.unlink(temp_path)
-        except:
-            pass
-
-# -------------------- Ventana de Selección de Dispositivo --------------------
-
-class DeviceSelectWindow(ctk.CTkToplevel):
-    def __init__(self, parent, on_select_callback):
-        super().__init__(parent)
-        self.on_select_callback = on_select_callback
-        self.title("Seleccionar Dispositivo")
-        self.geometry("400x500")
-        self.resizable(False, False)
-        
-        self.transient(parent)
-        self.grab_set()
-
-        self.label = ctk.CTkLabel(self, text="Escaneando dispositivos...", font=("Arial", 16, "bold"))
-        self.label.pack(pady=10)
-
-        self.scroll_frame = ctk.CTkScrollableFrame(self, width=350, height=350)
-        self.scroll_frame.pack(pady=10, padx=10, fill="both", expand=True)
-
-        self.btn_refresh = ctk.CTkButton(self, text="Escanear de nuevo", command=self.start_scan)
-        self.btn_refresh.pack(pady=10)
-
-        self.start_scan()
-
-    def start_scan(self):
-        for widget in self.scroll_frame.winfo_children():
-            widget.destroy()
-        
-        self.label.configure(text="Buscando dispositivos...")
-        self.btn_refresh.configure(state="disabled")
-        threading.Thread(target=self._scan_thread, daemon=True).start()
-
-    def _scan_thread(self):
-        async def get_devices():
-            return await BleakScanner.discover(timeout=5.0)
-
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        devices = loop.run_until_complete(get_devices())
-        loop.close()
-
-        self.after(0, lambda: self._update_list(devices))
-
-    def _update_list(self, devices):
-        self.label.configure(text="Selecciona tu Hub:")
-        self.btn_refresh.configure(state="normal")
-        
-        found_any = False
-        for dev in devices:
-            name = dev.name if dev.name else "Desconocido"
-            address = dev.address
-            
-            if name != "Desconocido": 
-                found_any = True
-                btn = ctk.CTkButton(
-                    self.scroll_frame, 
-                    text=f"{name}\n({address})", 
-                    command=lambda d=dev: self._on_device_click(d),
-                    height=50,
-                    anchor="w"
-                )
-                btn.pack(pady=5, padx=5, fill="x")
-
-        if not found_any:
-            lbl = ctk.CTkLabel(self.scroll_frame, text="No se encontraron dispositivos con nombre.")
-            lbl.pack(pady=20)
-
-    def _on_device_click(self, device):
-        self.on_select_callback(device)
-        self.destroy()
-
-# -------------------- Worker BLE -------------------- 
+# ==============================================================================
+# 2. WORKER BLE (Gestor de Comunicación en Segundo Plano)
+# ==============================================================================
+# Importar la excepción específica para poder ignorarla
+from pybricksdev.connections.pybricks import HubDisconnectError 
 
 class BLEWorker:
     def __init__(self, log_queue: Queue):
         self.loop = asyncio.new_event_loop()
         self.thread = threading.Thread(target=self._thread_main, daemon=True)
-        self.queue = asyncio.Queue()
+        self.queue = None
         self.hub = None
         self.running = threading.Event()
         self.log_queue = log_queue
-        
-        self._connect_request = asyncio.Event()
         self._target_device = None
+        self._connect_request = asyncio.Event()
+        self.run_task = None 
 
-    def log(self, msg: str):
+        # Diccionario para traducir letras a texto legible en el Log
+        self.CMD_DESC = {
+            'F': "▲ Avanzando",
+            'B': "▼ Retrocediendo",
+            'L': "◀ Viraje Izquierda",
+            'R': "▶ Viraje Derecha",
+            'C': "● Dirección Centrada",
+            'T': " ¡TURBO! ",
+            'S': "Deteniendo Motores",
+            'X': "Desconexión"
+        }
+
+    def log(self, msg):
         self.log_queue.put(msg)
 
     def _thread_main(self):
@@ -169,245 +97,358 @@ class BLEWorker:
         self.loop.run_forever()
 
     async def _runner(self):
-        try:
-            while True:
-                self.log("Esperando selección de dispositivo...")
-                await self._connect_request.wait()
-                
-                device = self._target_device
-                if not device:
+        temp_path = None
+        while True:
+            await self._connect_request.wait()
+            
+            try:
+                if not self._target_device:
                     self._connect_request.clear()
                     continue
 
-                try:
-                    self.log(f"Conectando a {device.name}...")
-                    self.hub = PybricksHubBLE(device)
-                    await self.hub.connect()
-                    self.log("Conectado. Listo para conducir.")
-                    self.running.set()
+                self.log(f"Conectando a {self._target_device.name}...")
+                self.hub = PybricksHubBLE(self._target_device)
+                await self.hub.connect()
 
-                    while self.running.is_set():
-                        drive_cmd = await self.queue.get()
-                        await execute_command(self.hub, drive_cmd, self.log)
+                self.log("Cargando firmware gateway...")
+                with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False) as tf:
+                    tf.write(HUB_GATEWAY_CODE)
+                    temp_path = tf.name
+
+                self.queue = asyncio.Queue()
                 
-                except Exception as e:
-                    self.log(f"Error de conexión/ejecución: {e}")
-                finally:
-                    if self.hub:
-                        try:
-                            await self.hub.disconnect()
-                            self.log("Hub desconectado.")
-                        except:
-                            pass
-                    self.hub = None
-                    self.running.clear()
-                    self._connect_request.clear()
-                    self._target_device = None
+                # Guardamos la tarea en self.run_task para poder cancelarla limpiamente luego
+                self.run_task = asyncio.create_task(self.hub.run(temp_path))
+                
+                await asyncio.sleep(1) 
+                self.running.set()
+                self.log("¡CONEXIÓN ESTABLECIDA!") 
 
-        except asyncio.CancelledError:
-            pass
+                while self.running.is_set():
+                    try:
+                        cmd = await self.queue.get()
+                        if self.hub: 
+                            await self.hub.write(cmd.encode())
+                    except asyncio.CancelledError:
+                        break 
+                    except Exception as e:
+                        if "disconnected" in str(e):
+                            break
+                        self.log(f"Error enviando: {e}")
+
+            except HubDisconnectError:
+                # Ignoramos el error de desconexión normal
+                pass
+            except Exception as e:
+                self.log(f"Error general: {e}")
+            finally:
+                # Limpieza de archivo temporal
+                if temp_path and os.path.exists(temp_path):
+                    try: os.unlink(temp_path)
+                    except: pass
+                
+                # Cancelar la tarea que corre el programa en el hub si sigue viva
+                if self.run_task and not self.run_task.done():
+                    self.run_task.cancel()
+                    try: await self.run_task
+                    except: pass 
+                
+                if self.hub:
+                    try: await self.hub.disconnect()
+                    except: pass
+                
+                self.running.clear()
+                self._connect_request.clear()
+                self._target_device = None
+                self.hub = None
+                self.log("Sistema Desconectado.")
 
     def start(self):
         if not self.thread.is_alive():
             self.thread.start()
 
     def connect_to_device(self, device):
-        if self.loop.is_running():
-            async def trigger():
-                self._target_device = device
-                self._connect_request.set()
-            asyncio.run_coroutine_threadsafe(trigger(), self.loop)
+        self._target_device = device
+        self.loop.call_soon_threadsafe(self._connect_request.set)
 
-    def stop(self):
-        if self.loop.is_running():
-            for task in asyncio.all_tasks(self.loop):
-                task.cancel()
-            self.loop.call_soon_threadsafe(self.loop.stop)
+    def send_command(self, char):
+        if self.running.is_set() and self.queue:
+            # 1. Enviar el comando al loop asyncio
+            self.loop.call_soon_threadsafe(self.queue.put_nowait, char)
+            
+            # 2. Traducir y mostrar en GUI
+            desc = self.CMD_DESC.get(char, f"Comando: {char}")
+            # Evitamos spamear el log si es solo soltar tecla (Stop), opcionalmente
+            self.log(f"Acción: {desc}")
 
-    def send_command(self, cmd: str):
-        if self.loop.is_running() and self.queue is not None:
-            self.loop.call_soon_threadsafe(self.queue.put_nowait, cmd)
-    
-    def disconnect_now(self):
+    def stop_connection(self):
         self.running.clear()
+        # Enviamos 'X' para que el Hub se apague solo antes de cortar el Bluetooth
+        if self.queue:
+            self.loop.call_soon_threadsafe(self.queue.put_nowait, "X")
+# ===================================================================
+# 3. VENTANA DE SELECCIÓN 
+# ===================================================================
+class DeviceSelectWindow(ctk.CTkToplevel):
+    def __init__(self, parent, callback):
+        super().__init__(parent)
+        self.callback = callback
+        self.title("Buscar HUB LEGO")
+        self.geometry("400x400")
+        self.attributes("-topmost", True)
+        self.grab_set()
 
-# -------------------- GUI -------------------- 
+        self.lbl = ctk.CTkLabel(self, text="Escaneando dispositivos BLE...", font=("Arial", 14))
+        self.lbl.pack(pady=10)
 
-class LegoGUI:
-    def __init__(self, root: ctk.CTk):
+        self.scroll = ctk.CTkScrollableFrame(self)
+        self.scroll.pack(expand=True, fill="both", padx=10, pady=10)
+
+        threading.Thread(target=self._scan, daemon=True).start()
+
+    def _scan(self):
+        loop = asyncio.new_event_loop()
+        devices = loop.run_until_complete(BleakScanner.discover(timeout=4.0))
+        loop.close()
+        self.after(0, lambda: self._show(devices))
+
+    def _show(self, devices):
+        self.lbl.configure(text="Seleccione su dispositivo:")
+        found = False
+        for d in devices:
+            if d.name and d.name != "Unknown":
+                found = True
+                btn = ctk.CTkButton(
+                    self.scroll,
+                    text=f"{d.name}\n[{d.address}]",
+                    command=lambda dev=d: self._select(dev),
+                    height=40,
+                    fg_color="#1F6AA5"
+                )
+                btn.pack(pady=5, fill="x")
+        
+        if not found:
+            self.lbl.configure(text="No se encontraron Hubs.")
+
+    def _select(self, device):
+        self.callback(device)
+        self.destroy()
+
+# ==========================================
+# 4. GUI PRINCIPAL 
+# ==========================================
+class LegoNitroGUI:
+    def create_btn(self, t, c, r, col, rel):
+        b = ctk.CTkButton(self.cf, text=t, height=45, fg_color=self.COLOR_BTN_NORMAL)
+
+    COLOR_BTN_NORMAL = "#1F6AA5"
+    COLOR_BTN_ACTIVE = "#144870"
+    COLOR_TURBO_NORMAL = "#D32F2F"
+    COLOR_TURBO_ACTIVE = "#8E0000"
+    # ---------------------
+    def __init__(self, root):
         self.root = root
-        self.root.title("Control de Auto LEGO - Pybricks")
-        self.root.geometry("600x520") # Aumenté un poco el alto para que quepa el botón extra
+        self.root.title("Control de Camión Minero - LEGO SPIKE")
+        self.root.geometry("600x600")
 
+        # Variables de estado
+        self.keys_pressed = set()
         self.log_queue = Queue()
+        
+        # Iniciar Worker
         self.worker = BLEWorker(self.log_queue)
         self.worker.start()
-        
-        self.simulated_disconnect = False
 
+        # Construir Interfaz
         self._build_ui()
+        
+        # Iniciar loop de logs
         self._poll_logs()
 
     def _build_ui(self):
-        top = ctk.CTkFrame(self.root)
-        top.pack(fill='x', padx=10, pady=10)
-        
-        self.btn_connect = ctk.CTkButton(top, text="Buscar y Conectar", command=self.on_connect_click, width=150, height=35)
-        self.btn_connect.pack(side='left', padx=10, pady = 10)
-        
-        self.btn_disconnect = ctk.CTkButton(top, text="Desconectar", command=self.on_disconnect, width=100, height=35)
-        self.btn_disconnect.pack(side='left', padx=10)
-        
+        # --- PANEL SUPERIOR (Conexión) ---
+        top_frame = ctk.CTkFrame(self.root)
+        top_frame.pack(fill="x", padx=15, pady=15)
+
+        self.btn_connect = ctk.CTkButton(top_frame, text="BUSCAR Y CONECTAR", command=self.open_selector, width=180)
+        self.btn_connect.pack(side="left", padx=5, pady=5)
+
+        self.btn_disconnect = ctk.CTkButton(top_frame, text="DESCONECTAR", command=self.on_disconnect, width=120, fg_color="#555555")
+        self.btn_disconnect.pack(side="left", padx=5, pady=5)
         self.btn_disconnect.configure(state="disabled")
 
-        self.status = ctk.CTkLabel(top, text="Estado: sin conexión")
-        self.status.pack(side='right', padx = 10)
+        self.status_lbl = ctk.CTkLabel(top_frame, text="● DESCONECTADO", text_color="red", font=("Arial", 12, "bold"))
+        self.status_lbl.pack(side="right", padx=15)
 
-        body = ctk.CTkFrame(self.root)
-        body.pack(expand=True, padx= 10, pady= 10)
+        # --- PANEL CENTRAL (Controles) ---
+        self.control_frame = ctk.CTkFrame(self.root)
+        self.control_frame.pack(expand=True, fill="both", padx=15, pady=5)
+        
+        # Configuración de grilla
+        self.control_frame.grid_columnconfigure((0, 1, 2), weight=1)
+        self.control_frame.grid_rowconfigure((0, 1, 2, 3, 4), weight=1)
 
-        # --- BOTONES DE MOVIMIENTO ---
-
-        # Botón TURBO (Fila 0) - Rojo y llamativo
+        # Botón TURBO (Rojo)
         self.btn_turbo = ctk.CTkButton(
-            body, 
+            self.control_frame, 
             text=" TURBO ", 
-            command=self.cmd_turbo_click, 
-            width=120, 
-            height=40,
-            fg_color="#D32F2F",     # Rojo oscuro
-            hover_color="#B71C1C",  # Rojo más oscuro al pasar el mouse
+            fg_color="#D32F2F", 
+            hover_color="#B71C1C",
+            height=50,
             font=("Arial", 14, "bold")
         )
-        self.btn_turbo.grid(row=0, column=1, pady=(10, 5))
+        self.btn_turbo.grid(row=0, column=1, pady=(20, 10), sticky="ew")
+        # Eventos Press/Release para Turbo
+        self.btn_turbo.bind("<ButtonPress-1>", lambda e: self.worker.send_command("T"))
+        self.btn_turbo.bind("<ButtonRelease-1>", lambda e: self.worker.send_command("S"))
 
-        # Botón Avanzar (Fila 1)
-        self.btn_avanzar = ctk.CTkButton(body, text="Avanzar", command=self.cmd_avanzar_click, width= 100, height= 35)
-        self.btn_avanzar.grid(row=1, column=1, pady=5)
-
-        # Izquierda / Derecha (Fila 2)
-        self.btn_izquierda = ctk.CTkButton(body, text="Izquierda", command=self.cmd_izquierda, width= 100, height= 35)
-        self.btn_izquierda.grid(row=2, column=0, padx=10, pady=5)
-
-        self.btn_derecha = ctk.CTkButton(body, text="Derecha", command=self.cmd_derecha, width= 100, height= 35)
-        self.btn_derecha.grid(row=2, column=2, padx=10, pady=5)
+        # Botones de Dirección
+        # Avanzar
+        self.btn_avanzar = self.create_momentary_btn("▲ AVANZAR", "F", 1, 1)
         
-        # Botón Retroceder (Fila 3)
-        self.btn_retro = ctk.CTkButton(body, text="Retroceder", command=self.cmd_retro_click, width= 100, height= 35)
-        self.btn_retro.grid(row=3, column=1, pady=5)
-
-        # Restablecer (Fila 4)
-        self.btn_restablecer = ctk.CTkButton(body, text="Restablecer Dirección", command=self.cmd_restablecer, height = 35)
-        self.btn_restablecer.grid(row=4, column=1, pady=15)
+        # Izquierda / Centro / Derecha
+        self.btn_izq = self.create_momentary_btn("◀ IZQ", "L", 2, 0)
         
+        # Botón Centro (Es de un solo click, no momentary)
+        self.btn_centro = ctk.CTkButton(self.control_frame, text="● CENTRAR", command=lambda: self.worker.send_command("C"), height=40)
+        self.btn_centro.grid(row=2, column=1, padx=5, pady=5)
+        
+        self.btn_der = self.create_momentary_btn("DER ▶", "R", 2, 2)
+        
+        # Retroceder
+        self.btn_retro = self.create_momentary_btn("▼ ATRÁS", "B", 3, 1)
+
+        # --- PANEL INFERIOR (Logs) ---
+        log_frame = ctk.CTkFrame(self.root)
+        log_frame.pack(fill="x", padx=15, pady=15)
+        
+        ctk.CTkLabel(log_frame, text="Registro de Sistema:").pack(anchor="w", padx=5)
+        self.log_box = ctk.CTkTextbox(log_frame, height=120)
+        self.log_box.pack(fill="x", padx=5, pady=5)
+        self.log_box.configure(state="disabled")
+
+        # Configurar estado inicial (bloqueado)
         self.set_controls_enabled(False)
 
-        # Log Area
-        logf = ctk.CTkFrame(self.root)
-        logf.pack(fill='both', expand=True, padx=10, pady=10)
+        # Bindings de Teclado (Globales)
+        self.root.bind("<KeyPress>", self._on_key_press)
+        self.root.bind("<KeyRelease>", self._on_key_release)
 
-        log_title = ctk.CTkLabel(logf, text="Registro")
-        log_title.pack(anchor='w', padx=10, pady=(0, 5))
-
-        self.log_text = ctk.CTkTextbox(logf, height=140)
-        self.log_text.pack(fill='both', expand=True)
-        self.log_text.configure(state='disabled')
-
-    # -------------------- Controles -------------------- 
+    def create_momentary_btn(self, text, cmd_char, r, c):
+        """Crea un botón que envía comando al presionar y Stop al soltar"""
+        btn = ctk.CTkButton(self.control_frame, text=text, height=45)
+        btn.grid(row=r, column=c, padx=5, pady=5, sticky="ew")
+        
+        # Vincular eventos de mouse
+        btn.bind("<ButtonPress-1>", lambda e: self.worker.send_command(cmd_char))
+        btn.bind("<ButtonRelease-1>", lambda e: self.worker.send_command("S"))
+        return btn
 
     def set_controls_enabled(self, enabled: bool):
+        """Habilita o deshabilita los botones de control visuales"""
         state = "normal" if enabled else "disabled"
-        # Incluimos el botón turbo en la lista de bloqueo/desbloqueo
-        buttons = [
-            self.btn_turbo, 
-            self.btn_avanzar, 
-            self.btn_retro, 
-            self.btn_izquierda, 
-            self.btn_derecha, 
-            self.btn_restablecer
+        
+        # Lista de botones a controlar
+        control_buttons = [
+            self.btn_turbo, self.btn_avanzar, self.btn_retro,
+            self.btn_izq, self.btn_der, self.btn_centro
         ]
-        for btn in buttons:
+        
+        for btn in control_buttons:
             btn.configure(state=state)
+            
+        if enabled:
+            self.btn_connect.configure(state="disabled")
+            self.btn_disconnect.configure(state="normal")
+            self.status_lbl.configure(text="● CONECTADO", text_color="green")
+        else:
+            self.btn_connect.configure(state="normal")
+            self.btn_disconnect.configure(state="disabled")
+            self.status_lbl.configure(text="● DESCONECTADO", text_color="red")
 
-    def cmd_turbo_click(self):
-        if self.worker.running.is_set():
-            self.worker.send_command("run_turbo")
-
-    def cmd_avanzar_click(self):
-        if self.worker.running.is_set():
-            self.worker.send_command("run_forward")
-
-    def cmd_retro_click(self):
-        if self.worker.running.is_set():
-            self.worker.send_command("run_backward")
-
-    def cmd_izquierda(self):
-        if self.worker.running.is_set():
-            self.worker.send_command("izquierda")
-
-    def cmd_derecha(self):
-        if self.worker.running.is_set():
-            self.worker.send_command("derecha")
-
-    def cmd_restablecer(self):
-        if self.worker.running.is_set():
-            self.worker.send_command("centro")
-
-    # -------------------- Conexión -------------------- 
-
-    def on_connect_click(self):
+    def open_selector(self):
         DeviceSelectWindow(self.root, self.on_device_selected)
 
     def on_device_selected(self, device):
-        self._log(f"Seleccionado: {device.name} ({device.address})")
-        self.status.configure(text="Estado: conectando...")
-        
-        self.btn_connect.configure(state="disabled")
+        self.log_to_gui(f"Dispositivo seleccionado: {device.name}")
+        self.status_lbl.configure(text="CONECTANDO...", text_color="orange")
         self.worker.connect_to_device(device)
-        self.wait_connection_ready()
-
-    def wait_connection_ready(self):
-        if self.worker.running.is_set():
-            self.status.configure(text="Estado: conectado")
-            self.set_controls_enabled(True)
-            self.btn_connect.configure(state="disabled")
-            self.btn_disconnect.configure(state="normal")
-        else:
-            self.root.after(200, self.wait_connection_ready)
 
     def on_disconnect(self):
+        self.worker.stop_connection()
         self.set_controls_enabled(False)
-        self.worker.disconnect_now()
-        self.status.configure(text="Estado: desconectado")
-        self._log("Comando desconexión enviado.")
+
+    # --- Lógica de Teclado ---
+    def _on_key_press(self, e):
+        # Evitar repetición automática de teclas
+        if e.keysym in self.keys_pressed:
+            return
+        self.keys_pressed.add(e.keysym)
+
+        if not self.worker.running.is_set(): return
         
-        self.btn_connect.configure(state="normal")
-        self.btn_disconnect.configure(state="disabled")
+        # --- NUEVA SECCIÓN VISUAL (Prender luz) ---
+        if e.keysym == "Up": self.btn_avanzar.configure(fg_color=self.COLOR_BTN_ACTIVE)
+        elif e.keysym == "Down": self.btn_retro.configure(fg_color=self.COLOR_BTN_ACTIVE)
+        elif e.keysym == "Left": self.btn_izq.configure(fg_color=self.COLOR_BTN_ACTIVE)
+        elif e.keysym == "Right": self.btn_der.configure(fg_color=self.COLOR_BTN_ACTIVE)
+        elif e.keysym == "Return": self.btn_turbo.configure(fg_color=self.COLOR_TURBO_ACTIVE)
+        elif e.keysym == "space": self.btn_centro.configure(fg_color=self.COLOR_BTN_ACTIVE)
+        # ------------------------------------------
 
-    # -------------------- Logs -------------------- 
+        # Lógica de envío al robot (Igual que antes)...
+        if e.keysym == "Up": self.worker.send_command("F")
+        elif e.keysym == "Down": self.worker.send_command("B")
+        elif e.keysym == "Left": self.worker.send_command("L")
+        elif e.keysym == "Right": self.worker.send_command("R")
+        elif e.keysym == "Return": self.worker.send_command("T")
+        elif e.keysym == "space": self.worker.send_command("C")
 
-    def _log(self, msg: str):
-        self.log_queue.put(msg)
+    def _on_key_release(self, e):
+        self.keys_pressed.discard(e.keysym)
+        if not self.worker.running.is_set(): return
+
+        # Soltar Acelerador -> Stop Tracción ('S')
+        if e.keysym in ("Up", "Down", "Return"):
+            self.worker.send_command("S")
+        
+        # --- NUEVA SECCIÓN VISUAL (Apagar luz) ---
+        if e.keysym == "Up": self.btn_avanzar.configure(fg_color=self.COLOR_BTN_NORMAL)
+        elif e.keysym == "Down": self.btn_retro.configure(fg_color=self.COLOR_BTN_NORMAL)
+        elif e.keysym == "Left": self.btn_izq.configure(fg_color=self.COLOR_BTN_NORMAL)
+        elif e.keysym == "Right": self.btn_der.configure(fg_color=self.COLOR_BTN_NORMAL)
+        elif e.keysym == "Return": self.btn_turbo.configure(fg_color=self.COLOR_TURBO_NORMAL)
+        elif e.keysym == "space": self.btn_centro.configure(fg_color=self.COLOR_BTN_NORMAL)
+        # -----------------------------------------
+
+
+    # --- Lógica de Logs ---
+    def log_to_gui(self, msg):
+        self.log_box.configure(state="normal")
+        self.log_box.insert("end", f"> {msg}\n")
+        self.log_box.see("end")
+        self.log_box.configure(state="disabled")
 
     def _poll_logs(self):
         try:
             while True:
                 msg = self.log_queue.get_nowait()
-                self.log_text.configure(state='normal')
-                self.log_text.insert('end', msg + "\n")
-                self.log_text.see('end')
-                self.log_text.configure(state='disabled')
+                self.log_to_gui(msg)
+                
+                # Detectar mensaje de éxito para habilitar controles
+                if "¡CONEXIÓN ESTABLECIDA!" in msg:
+                    self.set_controls_enabled(True)
+                # Detectar desconexión
+                if "Sistema Desconectado" in msg:
+                    self.set_controls_enabled(False)
+                    
         except Empty:
             pass
-        self.root.after(150, self._poll_logs)
+        self.root.after(100, self._poll_logs)
 
-def main():
+if __name__ == "__main__":
     ctk.set_appearance_mode("dark")
     ctk.set_default_color_theme("blue")
     root = ctk.CTk()
-    app = LegoGUI(root)
-    root.resizable(False, False)
+    app = LegoNitroGUI(root)
     root.mainloop()
-
-if __name__ == '__main__':
-    main()
